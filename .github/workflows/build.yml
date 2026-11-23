@@ -74,90 +74,19 @@ jobs:
           rootProject.name = 'showlyricsmobile'
           __SRC_EOF__
           mkdir -p "mod/src/main/java/com/showlyricsmobile"
-          cat > "mod/src/main/java/com/showlyricsmobile/Config.java" <<'__SRC_EOF__'
+          cat > "mod/src/main/java/com/showlyricsmobile/BasicHud.java" <<'__SRC_EOF__'
           package com.showlyricsmobile;
 
-          import net.fabricmc.loader.api.FabricLoader;
-
-          import java.nio.file.Files;
-          import java.nio.file.Path;
-          import java.util.Properties;
-
-          final class Config {
-              static boolean enabled = true;
-              static boolean hint = true;
-              static int port = 38917;
-              static int offsetMs = 0;
-              static int yPercent = 78;
-
-              static void load() {
-                  Path file = FabricLoader.getInstance().getConfigDir().resolve("showlyricsmobile.properties");
-                  Properties p = new Properties();
-                  try {
-                      if (Files.exists(file)) {
-                          try (var in = Files.newInputStream(file)) {
-                              p.load(in);
-                          }
-                      }
-                      enabled = Boolean.parseBoolean(p.getProperty("enabled", "true").trim());
-                      hint = Boolean.parseBoolean(p.getProperty("hint", "true").trim());
-                      port = (int) num(p, "port", 38917);
-                      offsetMs = (int) num(p, "offsetMs", 0);
-                      yPercent = (int) num(p, "yPercent", 78);
-
-                      p.setProperty("enabled", String.valueOf(enabled));
-                      p.setProperty("hint", String.valueOf(hint));
-                      p.setProperty("port", String.valueOf(port));
-                      p.setProperty("offsetMs", String.valueOf(offsetMs));
-                      p.setProperty("yPercent", String.valueOf(yPercent));
-                      try (var out = Files.newOutputStream(file)) {
-                          p.store(out, "Show Lyrics Mobile. offsetMs: positive = lyrics appear earlier, negative = later. yPercent: vertical position (0-100). hint: show a message when the Android app is not running.");
-                      }
-                  } catch (Exception e) {
-                      LyricsMod.LOG.warn("Could not read/write config", e);
-                  }
-              }
-
-              private static double num(Properties p, String key, double def) {
-                  try {
-                      return Double.parseDouble(p.getProperty(key, String.valueOf(def)).trim());
-                  } catch (Exception e) {
-                      return def;
-                  }
-              }
-          }
-          __SRC_EOF__
-          mkdir -p "mod/src/main/java/com/showlyricsmobile"
-          cat > "mod/src/main/java/com/showlyricsmobile/LyricsMod.java" <<'__SRC_EOF__'
-          package com.showlyricsmobile;
-
-          import net.fabricmc.api.ClientModInitializer;
-          import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
-          import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
           import net.minecraft.client.Minecraft;
           import net.minecraft.client.gui.Font;
           import net.minecraft.client.gui.GuiGraphics;
-          import net.minecraft.resources.Identifier;
-          import org.slf4j.Logger;
-          import org.slf4j.LoggerFactory;
 
           import java.util.ArrayList;
           import java.util.List;
 
-          public class LyricsMod implements ClientModInitializer {
-              public static final Logger LOG = LoggerFactory.getLogger("showlyricsmobile");
-
-              @Override
-              public void onInitializeClient() {
-                  Config.load();
-                  Playback.start();
-                  HudElementRegistry.attachElementBefore(
-                          VanillaHudElements.CHAT,
-                          Identifier.fromNamespaceAndPath("showlyricsmobile", "lyrics"),
-                          (graphics, deltaTracker) -> render(graphics));
-              }
-
-              private static void render(GuiGraphics g) {
+          /** Flat 3-line lyrics near the bottom of the screen. Also used as a fallback. */
+          final class BasicHud {
+              static void render(GuiGraphics g) {
                   if (!Config.enabled) return;
                   Minecraft mc = Minecraft.getInstance();
                   if (mc.options.hideGui) return;
@@ -197,7 +126,7 @@ jobs:
               }
 
               /** Index of the last line whose timestamp is <= pos, or -1 if the song has not reached the first line. */
-              private static int indexAt(List<Playback.Line> lines, long pos) {
+              static int indexAt(List<Playback.Line> lines, long pos) {
                   int lo = 0, hi = lines.size() - 1, ans = -1;
                   while (lo <= hi) {
                       int mid = (lo + hi) >>> 1;
@@ -211,11 +140,11 @@ jobs:
                   return ans;
               }
 
-              private static void text(GuiGraphics g, Font font, String s, int cx, int y, int color) {
+              static void text(GuiGraphics g, Font font, String s, int cx, int y, int color) {
                   g.drawString(font, s, cx - font.width(s) / 2, y, color, true);
               }
 
-              private static String fit(Font font, String s, int maxW) {
+              static String fit(Font font, String s, int maxW) {
                   if (font.width(s) <= maxW) return s;
                   String ellipsis = "...";
                   int n = s.length();
@@ -266,6 +195,133 @@ jobs:
           }
           __SRC_EOF__
           mkdir -p "mod/src/main/java/com/showlyricsmobile"
+          cat > "mod/src/main/java/com/showlyricsmobile/Config.java" <<'__SRC_EOF__'
+          package com.showlyricsmobile;
+
+          import net.fabricmc.loader.api.FabricLoader;
+
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.Properties;
+
+          final class Config {
+              static boolean enabled = true;
+              static boolean hint = true;
+              static int port = 38917;
+              static int offsetMs = 0;
+              static int yPercent = 78;
+
+              // floating-lyrics options
+              static String theme = "rainbow";   // rainbow | album | gradient | solid
+              static int color1 = 0xFF6EC7;
+              static int color2 = 0x6EC7FF;
+              static float size = 0.5f;          // height of one lyric line, in blocks
+              static float distance = 5.0f;      // how far in front of you new lines appear, in blocks
+              static boolean follow = false;     // true = lines stay in front of you instead of staying in the world
+              static boolean showNext = true;    // small preview of the next line
+              static boolean showTitle = true;   // song name at the top
+              static boolean glow = true;
+
+              static void load() {
+                  Path file = FabricLoader.getInstance().getConfigDir().resolve("showlyricsmobile.properties");
+                  Properties p = new Properties();
+                  try {
+                      if (Files.exists(file)) {
+                          try (var in = Files.newInputStream(file)) {
+                              p.load(in);
+                          }
+                      }
+                      enabled = bool(p, "enabled", true);
+                      hint = bool(p, "hint", true);
+                      port = (int) num(p, "port", 38917);
+                      offsetMs = (int) num(p, "offsetMs", 0);
+                      yPercent = (int) num(p, "yPercent", 78);
+
+                      theme = p.getProperty("theme", "rainbow").trim().toLowerCase();
+                      color1 = hex(p, "color1", 0xFF6EC7);
+                      color2 = hex(p, "color2", 0x6EC7FF);
+                      size = (float) num(p, "size", 0.5);
+                      distance = (float) num(p, "distance", 5.0);
+                      follow = bool(p, "follow", false);
+                      showNext = bool(p, "showNext", true);
+                      showTitle = bool(p, "showTitle", true);
+                      glow = bool(p, "glow", true);
+                      if (size <= 0) size = 0.5f;
+                      if (distance < 1) distance = 1f;
+
+                      p.setProperty("enabled", String.valueOf(enabled));
+                      p.setProperty("hint", String.valueOf(hint));
+                      p.setProperty("port", String.valueOf(port));
+                      p.setProperty("offsetMs", String.valueOf(offsetMs));
+                      p.setProperty("yPercent", String.valueOf(yPercent));
+                      p.setProperty("theme", theme);
+                      p.setProperty("color1", String.format("%06X", color1));
+                      p.setProperty("color2", String.format("%06X", color2));
+                      p.setProperty("size", String.valueOf(size));
+                      p.setProperty("distance", String.valueOf(distance));
+                      p.setProperty("follow", String.valueOf(follow));
+                      p.setProperty("showNext", String.valueOf(showNext));
+                      p.setProperty("showTitle", String.valueOf(showTitle));
+                      p.setProperty("glow", String.valueOf(glow));
+                      try (var out = Files.newOutputStream(file)) {
+                          p.store(out, "Show Lyrics Mobile. theme: rainbow | album | gradient | solid. color1/color2: hex RRGGBB. "
+                                  + "offsetMs: positive = lyrics appear earlier. size: line height in blocks. distance: blocks in front of you. "
+                                  + "follow=true keeps lyrics in front of you. yPercent: vertical position of the flat (non-floating) lyrics.");
+                      }
+                  } catch (Exception e) {
+                      LyricsMod.LOG.warn("Could not read/write config", e);
+                  }
+              }
+
+              private static boolean bool(Properties p, String key, boolean def) {
+                  return Boolean.parseBoolean(p.getProperty(key, String.valueOf(def)).trim());
+              }
+
+              private static double num(Properties p, String key, double def) {
+                  try {
+                      return Double.parseDouble(p.getProperty(key, String.valueOf(def)).trim());
+                  } catch (Exception e) {
+                      return def;
+                  }
+              }
+
+              private static int hex(Properties p, String key, int def) {
+                  try {
+                      String s = p.getProperty(key, "").trim();
+                      if (s.startsWith("#")) s = s.substring(1);
+                      return s.isEmpty() ? def : (Integer.parseInt(s, 16) & 0xFFFFFF);
+                  } catch (Exception e) {
+                      return def;
+                  }
+              }
+          }
+          __SRC_EOF__
+          mkdir -p "mod/src/main/java/com/showlyricsmobile"
+          cat > "mod/src/main/java/com/showlyricsmobile/LyricsMod.java" <<'__SRC_EOF__'
+          package com.showlyricsmobile;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+          import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
+          import net.minecraft.resources.Identifier;
+          import org.slf4j.Logger;
+          import org.slf4j.LoggerFactory;
+
+          public class LyricsMod implements ClientModInitializer {
+              public static final Logger LOG = LoggerFactory.getLogger("showlyricsmobile");
+
+              @Override
+              public void onInitializeClient() {
+                  Config.load();
+                  Playback.start();
+                  HudElementRegistry.attachElementBefore(
+                          VanillaHudElements.CHAT,
+                          Identifier.fromNamespaceAndPath("showlyricsmobile", "lyrics"),
+                          (graphics, deltaTracker) -> Hud.render(graphics, deltaTracker.getGameTimeDeltaPartialTick(false)));
+              }
+          }
+          __SRC_EOF__
+          mkdir -p "mod/src/main/java/com/showlyricsmobile"
           cat > "mod/src/main/java/com/showlyricsmobile/Playback.java" <<'__SRC_EOF__'
           package com.showlyricsmobile;
 
@@ -296,6 +352,7 @@ jobs:
               static volatile String artist = "";
               static volatile List<Line> lyrics = List.of();
               static volatile String status = "";
+              static volatile int artColor = -1; // album colour (RGB) from the phone, or -1
 
               private static volatile boolean playing = false;
               private static volatile long basePos = 0;
@@ -349,6 +406,7 @@ jobs:
                       return;
                   }
                   playing = o.has("playing") && o.get("playing").getAsBoolean();
+                  artColor = (o.has("color") && !o.get("color").isJsonNull()) ? (int) lng(o, "color") : -1;
                   basePos = lng(o, "positionMs");
                   baseNano = System.nanoTime();
 
@@ -389,482 +447,4 @@ jobs:
                               long diff = (dur > 0 && cd > 0) ? Math.abs(cd - dur) : 0;
                               if (diff < bestDiff) {
                                   bestDiff = diff;
-                                  synced = s;
-                              }
-                          }
-                      }
-                  } catch (Exception e) {
-                      if (key.equals(lastKey)) status = "Lyrics lookup failed";
-                      return;
-                  }
-
-                  if (!key.equals(lastKey)) return; // song changed meanwhile
-                  List<Line> parsed = synced.isBlank() ? List.of() : parse(synced);
-                  if (parsed.isEmpty()) {
-                      status = "No synced lyrics found";
-                  } else {
-                      lyrics = parsed;
-                  }
-              }
-
-              static List<Line> parse(String lrc) {
-                  List<Line> out = new ArrayList<>();
-                  for (String raw : lrc.split("\\R")) {
-                      Matcher m = TS.matcher(raw);
-                      List<Long> times = new ArrayList<>();
-                      int end = 0;
-                      while (m.find() && m.start() == end) {
-                          long min = Long.parseLong(m.group(1));
-                          long sec = Long.parseLong(m.group(2));
-                          String fr = m.group(3);
-                          long ms = 0;
-                          if (fr != null) {
-                              ms = Long.parseLong(fr) * (fr.length() == 1 ? 100 : fr.length() == 2 ? 10 : 1);
-                          }
-                          times.add(min * 60000L + sec * 1000L + ms);
-                          end = m.end();
-                      }
-                      if (times.isEmpty()) continue;
-                      String text = raw.substring(end).trim();
-                      for (long tm : times) out.add(new Line(tm, text));
-                  }
-                  out.sort(Comparator.comparingLong(Line::timeMs));
-                  return out;
-              }
-
-              private static String clean(String s) {
-                  String c = s.replaceAll("\\s*[\\(\\[][^\\)\\]]*[\\)\\]]", "").replaceAll("\\s+", " ").trim();
-                  return c.isBlank() ? s : c;
-              }
-
-              private static String enc(String s) {
-                  return URLEncoder.encode(s, StandardCharsets.UTF_8);
-              }
-
-              private static String get(String url, int connectMs, int readMs) throws Exception {
-                  HttpURLConnection c = (HttpURLConnection) URI.create(url).toURL().openConnection();
-                  c.setConnectTimeout(connectMs);
-                  c.setReadTimeout(readMs);
-                  c.setRequestProperty("User-Agent", "ShowLyricsMobile/1.0 (Fabric mod)");
-                  try (InputStream in = c.getInputStream()) {
-                      return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-                  } finally {
-                      c.disconnect();
-                  }
-              }
-
-              private static String str(JsonObject o, String k) {
-                  JsonElement e = o.get(k);
-                  return (e == null || e.isJsonNull()) ? "" : e.getAsString();
-              }
-
-              private static long lng(JsonObject o, String k) {
-                  JsonElement e = o.get(k);
-                  return (e == null || e.isJsonNull()) ? 0L : e.getAsLong();
-              }
-
-              private static double dbl(JsonObject o, String k) {
-                  JsonElement e = o.get(k);
-                  return (e == null || e.isJsonNull()) ? 0.0 : e.getAsDouble();
-              }
-          }
-          __SRC_EOF__
-          mkdir -p "mod/src/main/resources"
-          cat > "mod/src/main/resources/fabric.mod.json" <<'__SRC_EOF__'
-          {
-            "schemaVersion": 1,
-            "id": "showlyricsmobile",
-            "version": "1.0.0",
-            "name": "Show Lyrics Mobile",
-            "description": "Shows synced lyrics of the song playing on your Android phone (needs the Lyrics Bridge app).",
-            "license": "MIT",
-            "environment": "client",
-            "entrypoints": {
-              "client": ["com.showlyricsmobile.LyricsMod"]
-            },
-            "depends": {
-              "fabricloader": ">=0.16.0",
-              "minecraft": "1.21.11",
-              "java": ">=21",
-              "fabric-api": "*"
-            }
-          }
-          __SRC_EOF__
-      - name: Build mod (tries a few Fabric API versions)
-        working-directory: mod
-        run: |
-          set -o pipefail
-          : > build.log
-          ok=0
-          for v in 0.141.3 0.140.2 0.139.4; do
-            echo "=== Trying Fabric API $v+1.21.11 ===" | tee -a build.log
-            if gradle build --no-daemon --console=plain -Pfabric_version="$v+1.21.11" 2>&1 | tee -a build.log; then
-              ok=1
-              break
-            fi
-          done
-          test "$ok" = 1
-      - name: Show errors in the run summary
-        if: failure()
-        working-directory: mod
-        run: |
-          touch build.log
-          {
-            echo '### Build failed - send a screenshot of this box'
-            echo '```'
-            grep -n -i -E 'what went wrong|error:|could not|not found|unsupported|failed' build.log | head -n 40 || true
-            echo '...'
-            tail -n 25 build.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: show-lyrics-mobile-mod
-          path: mod/build/libs/showlyricsmobile-1.0.0.jar
-
-  app:
-    name: Android app (Lyrics Bridge)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: gradle/actions/setup-gradle@v5
-        with:
-          gradle-version: '8.10.2'
-      - name: Write app sources
-        run: |
-          mkdir -p "bridge-app"
-          cat > "bridge-app/build.gradle" <<'__SRC_EOF__'
-          plugins {
-              id 'com.android.application' version '8.5.2' apply false
-          }
-          __SRC_EOF__
-          mkdir -p "bridge-app"
-          cat > "bridge-app/gradle.properties" <<'__SRC_EOF__'
-          org.gradle.jvmargs=-Xmx2048m
-          __SRC_EOF__
-          mkdir -p "bridge-app"
-          cat > "bridge-app/settings.gradle" <<'__SRC_EOF__'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = 'LyricsBridge'
-          include ':app'
-          __SRC_EOF__
-          mkdir -p "bridge-app/app"
-          cat > "bridge-app/app/build.gradle" <<'__SRC_EOF__'
-          plugins {
-              id 'com.android.application'
-          }
-
-          android {
-              namespace 'com.lyricsbridge'
-              compileSdk 34
-
-              defaultConfig {
-                  applicationId 'com.lyricsbridge'
-                  minSdk 24
-                  targetSdk 34
-                  versionCode 1
-                  versionName '1.0'
-              }
-
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-          }
-          __SRC_EOF__
-          mkdir -p "bridge-app/app/src/main"
-          cat > "bridge-app/app/src/main/AndroidManifest.xml" <<'__SRC_EOF__'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-              <uses-permission android:name="android.permission.INTERNET" />
-
-              <application
-                  android:label="Lyrics Bridge"
-                  android:theme="@android:style/Theme.DeviceDefault">
-
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-
-                  <service
-                      android:name=".MediaListener"
-                      android:exported="true"
-                      android:label="Lyrics Bridge"
-                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
-                      <intent-filter>
-                          <action android:name="android.service.notification.NotificationListenerService" />
-                      </intent-filter>
-                  </service>
-              </application>
-          </manifest>
-          __SRC_EOF__
-          mkdir -p "bridge-app/app/src/main/java/com/lyricsbridge"
-          cat > "bridge-app/app/src/main/java/com/lyricsbridge/MainActivity.java" <<'__SRC_EOF__'
-          package com.lyricsbridge;
-
-          import android.app.Activity;
-          import android.content.Intent;
-          import android.os.Bundle;
-          import android.provider.Settings;
-          import android.widget.Button;
-          import android.widget.LinearLayout;
-          import android.widget.TextView;
-
-          public class MainActivity extends Activity {
-              private TextView status;
-
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  int pad = (int) (24 * getResources().getDisplayMetrics().density);
-                  root.setPadding(pad, pad, pad, pad);
-
-                  status = new TextView(this);
-                  status.setTextSize(16);
-                  root.addView(status);
-
-                  Button open = new Button(this);
-                  open.setText("Open notification access settings");
-                  open.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
-                  root.addView(open);
-
-                  TextView help = new TextView(this);
-                  help.setTextSize(14);
-                  help.setPadding(0, pad, 0, 0);
-                  help.setText("1. Enable \"Lyrics Bridge\" in notification access.\n"
-                          + "2. Play music (Spotify, YouTube Music...).\n"
-                          + "3. Open Minecraft with the Show Lyrics Mobile mod.\n\n"
-                          + "If Android says \"Restricted setting\": Settings > Apps > Lyrics Bridge > "
-                          + "three dots menu > Allow restricted settings.");
-                  root.addView(help);
-
-                  setContentView(root);
-              }
-
-              @Override
-              protected void onResume() {
-                  super.onResume();
-                  String flat = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
-                  boolean on = flat != null && flat.contains(getPackageName());
-                  status.setText(on
-                          ? "Notification access: ON\nServer: 127.0.0.1:" + MediaListener.PORT
-                          : "Notification access: OFF\nTap the button and enable \"Lyrics Bridge\".");
-              }
-          }
-          __SRC_EOF__
-          mkdir -p "bridge-app/app/src/main/java/com/lyricsbridge"
-          cat > "bridge-app/app/src/main/java/com/lyricsbridge/MediaListener.java" <<'__SRC_EOF__'
-          package com.lyricsbridge;
-
-          import android.content.ComponentName;
-          import android.media.MediaMetadata;
-          import android.media.session.MediaController;
-          import android.media.session.MediaSessionManager;
-          import android.media.session.PlaybackState;
-          import android.os.SystemClock;
-          import android.service.notification.NotificationListenerService;
-
-          import org.json.JSONObject;
-
-          import java.io.BufferedReader;
-          import java.io.IOException;
-          import java.io.InputStreamReader;
-          import java.io.OutputStream;
-          import java.net.InetAddress;
-          import java.net.InetSocketAddress;
-          import java.net.ServerSocket;
-          import java.net.Socket;
-          import java.nio.charset.StandardCharsets;
-          import java.util.List;
-
-          /**
-           * Having notification access lets us read the active media sessions.
-           * Serves the current track as JSON on 127.0.0.1:PORT for the Minecraft mod.
-           */
-          public class MediaListener extends NotificationListenerService {
-              static final int PORT = 38917;
-
-              private ServerSocket server;
-              private Thread thread;
-
-              @Override
-              public void onListenerConnected() {
-                  startServer();
-              }
-
-              @Override
-              public void onListenerDisconnected() {
-                  stopServer();
-              }
-
-              @Override
-              public void onDestroy() {
-                  stopServer();
-                  super.onDestroy();
-              }
-
-              private synchronized void startServer() {
-                  if (thread != null && thread.isAlive()) return;
-                  thread = new Thread(() -> {
-                      try {
-                          ServerSocket ss = new ServerSocket();
-                          ss.setReuseAddress(true);
-                          ss.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT), 8);
-                          server = ss;
-                          while (!ss.isClosed()) {
-                              try (Socket s = ss.accept()) {
-                                  s.setSoTimeout(1000);
-                                  handle(s);
-                              } catch (IOException ignored) {
-                                  // client went away or timed out
-                              }
-                          }
-                      } catch (IOException ignored) {
-                          // could not bind (port in use) or socket closed
-                      }
-                  }, "LyricsBridge-server");
-                  thread.setDaemon(true);
-                  thread.start();
-              }
-
-              private synchronized void stopServer() {
-                  try {
-                      if (server != null) server.close();
-                  } catch (IOException ignored) {
-                  }
-                  server = null;
-                  thread = null;
-              }
-
-              private void handle(Socket s) throws IOException {
-                  BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.US_ASCII));
-                  String line;
-                  while ((line = in.readLine()) != null && !line.isEmpty()) {
-                      // skip request headers
-                  }
-                  byte[] body = buildJson().getBytes(StandardCharsets.UTF_8);
-                  String head = "HTTP/1.1 200 OK\r\n"
-                          + "Content-Type: application/json; charset=utf-8\r\n"
-                          + "Content-Length: " + body.length + "\r\n"
-                          + "Connection: close\r\n\r\n";
-                  OutputStream out = s.getOutputStream();
-                  out.write(head.getBytes(StandardCharsets.US_ASCII));
-                  out.write(body);
-                  out.flush();
-              }
-
-              private String buildJson() {
-                  JSONObject o = new JSONObject();
-                  try {
-                      MediaSessionManager msm = (MediaSessionManager) getSystemService(MEDIA_SESSION_SERVICE);
-                      List<MediaController> list = msm.getActiveSessions(new ComponentName(this, MediaListener.class));
-
-                      MediaController pick = null;
-                      for (MediaController c : list) {
-                          PlaybackState st = c.getPlaybackState();
-                          if (st != null && st.getState() == PlaybackState.STATE_PLAYING) {
-                              pick = c;
-                              break;
-                          }
-                      }
-                      if (pick == null && !list.isEmpty()) pick = list.get(0);
-
-                      MediaMetadata md = pick == null ? null : pick.getMetadata();
-                      if (md == null) {
-                          put(o, "active", false);
-                          return o.toString();
-                      }
-
-                      String title = first(md, MediaMetadata.METADATA_KEY_TITLE, MediaMetadata.METADATA_KEY_DISPLAY_TITLE);
-                      String artist = first(md, MediaMetadata.METADATA_KEY_ARTIST, MediaMetadata.METADATA_KEY_ALBUM_ARTIST,
-                              MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE);
-                      long duration = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
-
-                      PlaybackState st = pick.getPlaybackState();
-                      boolean playing = st != null && st.getState() == PlaybackState.STATE_PLAYING;
-                      long pos = 0;
-                      if (st != null) {
-                          pos = st.getPosition();
-                          if (pos < 0) pos = 0;
-                          if (playing) {
-                              long dt = SystemClock.elapsedRealtime() - st.getLastPositionUpdateTime();
-                              pos += (long) (dt * st.getPlaybackSpeed());
-                          }
-                          if (duration > 0 && pos > duration) pos = duration;
-                      }
-
-                      put(o, "active", true);
-                      put(o, "title", title);
-                      put(o, "artist", artist);
-                      put(o, "durationMs", duration);
-                      put(o, "positionMs", pos);
-                      put(o, "playing", playing);
-                  } catch (Exception e) {
-                      put(o, "active", false);
-                      put(o, "error", String.valueOf(e));
-                  }
-                  return o.toString();
-              }
-
-              private static String first(MediaMetadata md, String... keys) {
-                  for (String k : keys) {
-                      String v = md.getString(k);
-                      if (v != null && !v.trim().isEmpty()) return v.trim();
-                  }
-                  return "";
-              }
-
-              private static void put(JSONObject o, String k, Object v) {
-                  try {
-                      o.put(k, v);
-                  } catch (Exception ignored) {
-                  }
-              }
-          }
-          __SRC_EOF__
-      - name: Build APK
-        working-directory: bridge-app
-        run: |
-          set -o pipefail
-          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
-      - name: Show errors in the run summary
-        if: failure()
-        working-directory: bridge-app
-        run: |
-          touch build.log
-          {
-            echo '### Build failed - send a screenshot of this box'
-            echo '```'
-            grep -n -i -E 'what went wrong|error:|could not|not found|unsupported|failed' build.log | head -n 40 || true
-            echo '...'
-            tail -n 25 build.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: lyrics-bridge-apk
-          path: bridge-app/app/build/outputs/apk/debug/app-debug.apk
+              
