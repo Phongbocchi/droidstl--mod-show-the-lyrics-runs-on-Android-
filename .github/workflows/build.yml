@@ -447,4 +447,864 @@ jobs:
                               long diff = (dur > 0 && cd > 0) ? Math.abs(cd - dur) : 0;
                               if (diff < bestDiff) {
                                   bestDiff = diff;
-              
+                                  synced = s;
+                              }
+                          }
+                      }
+                  } catch (Exception e) {
+                      if (key.equals(lastKey)) status = "Lyrics lookup failed";
+                      return;
+                  }
+
+                  if (!key.equals(lastKey)) return; // song changed meanwhile
+                  List<Line> parsed = synced.isBlank() ? List.of() : parse(synced);
+                  if (parsed.isEmpty()) {
+                      status = "No synced lyrics found";
+                  } else {
+                      lyrics = parsed;
+                  }
+              }
+
+              static List<Line> parse(String lrc) {
+                  List<Line> out = new ArrayList<>();
+                  for (String raw : lrc.split("\\R")) {
+                      Matcher m = TS.matcher(raw);
+                      List<Long> times = new ArrayList<>();
+                      int end = 0;
+                      while (m.find() && m.start() == end) {
+                          long min = Long.parseLong(m.group(1));
+                          long sec = Long.parseLong(m.group(2));
+                          String fr = m.group(3);
+                          long ms = 0;
+                          if (fr != null) {
+                              ms = Long.parseLong(fr) * (fr.length() == 1 ? 100 : fr.length() == 2 ? 10 : 1);
+                          }
+                          times.add(min * 60000L + sec * 1000L + ms);
+                          end = m.end();
+                      }
+                      if (times.isEmpty()) continue;
+                      String text = raw.substring(end).trim();
+                      for (long tm : times) out.add(new Line(tm, text));
+                  }
+                  out.sort(Comparator.comparingLong(Line::timeMs));
+                  return out;
+              }
+
+              private static String clean(String s) {
+                  String c = s.replaceAll("\\s*[\\(\\[][^\\)\\]]*[\\)\\]]", "").replaceAll("\\s+", " ").trim();
+                  return c.isBlank() ? s : c;
+              }
+
+              private static String enc(String s) {
+                  return URLEncoder.encode(s, StandardCharsets.UTF_8);
+              }
+
+              private static String get(String url, int connectMs, int readMs) throws Exception {
+                  HttpURLConnection c = (HttpURLConnection) URI.create(url).toURL().openConnection();
+                  c.setConnectTimeout(connectMs);
+                  c.setReadTimeout(readMs);
+                  c.setRequestProperty("User-Agent", "ShowLyricsMobile/1.0 (Fabric mod)");
+                  try (InputStream in = c.getInputStream()) {
+                      return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                  } finally {
+                      c.disconnect();
+                  }
+              }
+
+              private static String str(JsonObject o, String k) {
+                  JsonElement e = o.get(k);
+                  return (e == null || e.isJsonNull()) ? "" : e.getAsString();
+              }
+
+              private static long lng(JsonObject o, String k) {
+                  JsonElement e = o.get(k);
+                  return (e == null || e.isJsonNull()) ? 0L : e.getAsLong();
+              }
+
+              private static double dbl(JsonObject o, String k) {
+                  JsonElement e = o.get(k);
+                  return (e == null || e.isJsonNull()) ? 0.0 : e.getAsDouble();
+              }
+          }
+          __SRC_EOF__
+          mkdir -p "mod/src/main/resources"
+          cat > "mod/src/main/resources/fabric.mod.json" <<'__SRC_EOF__'
+          {
+            "schemaVersion": 1,
+            "id": "showlyricsmobile",
+            "version": "1.0.0",
+            "name": "Show Lyrics Mobile",
+            "description": "Shows synced lyrics of the song playing on your Android phone (needs the Lyrics Bridge app).",
+            "license": "MIT",
+            "environment": "client",
+            "entrypoints": {
+              "client": ["com.showlyricsmobile.LyricsMod"]
+            },
+            "depends": {
+              "fabricloader": ">=0.16.0",
+              "minecraft": "1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          __SRC_EOF__
+          mkdir -p "variants/basic"
+          cat > "variants/basic/Hud.java" <<'__SRC_EOF__'
+          package com.showlyricsmobile;
+
+          import net.minecraft.client.gui.GuiGraphics;
+
+          final class Hud {
+              static void render(GuiGraphics g, float partial) {
+                  BasicHud.render(g);
+              }
+          }
+          __SRC_EOF__
+          mkdir -p "variants/full"
+          cat > "variants/full/Hud.java" <<'__SRC_EOF__'
+          package com.showlyricsmobile;
+
+          import net.minecraft.client.Minecraft;
+          import net.minecraft.client.gui.Font;
+          import net.minecraft.client.gui.GuiGraphics;
+          import net.minecraft.client.player.LocalPlayer;
+          import net.minecraft.world.phys.Vec3;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /**
+           * Floating lyrics: every new line is placed at a fixed point in the world in front of the player,
+           * then projected onto the screen every frame (perspective position + size), with colours and animation.
+           */
+          final class Hud {
+              private static final long FADE_OUT_MS = 1400;
+
+              private static final class Floating {
+                  final String text;
+                  final String next;
+                  final long born;
+                  long died = -1;
+                  final double wx, wy, wz;
+                  final float lat, vert, seed;
+
+                  Floating(String text, String next, long born, double[] a, float lat, float vert, float seed) {
+                      this.text = text;
+                      this.next = next;
+                      this.born = born;
+                      this.wx = a[0];
+                      this.wy = a[1];
+                      this.wz = a[2];
+                      this.lat = lat;
+                      this.vert = vert;
+                      this.seed = seed;
+                  }
+              }
+
+              private static final class Cam {
+                  double ex, ey, ez;        // eye position
+                  double rx, rz;            // right vector (y is 0)
+                  double fx, fy, fz;        // forward vector
+                  double ux, uy, uz;        // up vector
+                  double cfx, cfy, cfz;     // forward with limited pitch, used to place new lines
+                  double k;                 // pixels per unit at depth 1
+                  int cx, cy;               // screen centre
+
+                  double[] place(double dist, float lat, float vert) {
+                      return new double[]{
+                              ex + cfx * dist + rx * lat,
+                              ey + cfy * dist + vert,
+                              ez + cfz * dist + rz * lat};
+                  }
+
+                  /** Returns {screenX, screenY, depth}, or null when the point is behind the camera. */
+                  float[] project(double wx, double wy, double wz) {
+                      double dx = wx - ex, dy = wy - ey, dz = wz - ez;
+                      double depth = dx * fx + dy * fy + dz * fz;
+                      if (depth < 0.5) return null;
+                      double r = dx * rx + dz * rz;
+                      double u = dx * ux + dy * uy + dz * uz;
+                      return new float[]{(float) (cx + r / depth * k), (float) (cy - u / depth * k), (float) depth};
+                  }
+              }
+
+              private static final List<Floating> items = new ArrayList<>();
+              private static List<Playback.Line> lastLines = null;
+              private static String lastTrack = "";
+              private static int lastIdx = Integer.MIN_VALUE;
+
+              static void render(GuiGraphics g, float partial) {
+                  if (!Config.enabled) return;
+                  Minecraft mc = Minecraft.getInstance();
+                  LocalPlayer player = mc.player;
+                  if (mc.options.hideGui || player == null) return;
+
+                  if (!Playback.connected || !Playback.active) {
+                      items.clear();
+                      BasicHud.render(g);
+                      return;
+                  }
+
+                  List<Playback.Line> lines = Playback.lyrics;
+                  String track = Playback.artist + "|" + Playback.title;
+                  if (!track.equals(lastTrack) || lines != lastLines) {
+                      items.clear();
+                      lastTrack = track;
+                      lastLines = lines;
+                      lastIdx = Integer.MIN_VALUE;
+                  }
+                  // No lyrics yet, or third-person camera: use the flat lyrics instead
+                  if (lines.isEmpty() || !mc.options.getCameraType().isFirstPerson()) {
+                      items.clear();
+                      lastIdx = Integer.MIN_VALUE;
+                      BasicHud.render(g);
+                      return;
+                  }
+
+                  Font font = mc.font;
+                  int sw = mc.getWindow().getGuiScaledWidth();
+                  int sh = mc.getWindow().getGuiScaledHeight();
+
+                  // ----- camera -----
+                  Cam cam = new Cam();
+                  Vec3 eye = player.getEyePosition(partial);
+                  cam.ex = eye.x;
+                  cam.ey = eye.y;
+                  cam.ez = eye.z;
+                  double yr = Math.toRadians(player.getViewYRot(partial));
+                  double pitchDeg = player.getViewXRot(partial);
+                  double pr = Math.toRadians(pitchDeg);
+                  double sy = Math.sin(yr), cy = Math.cos(yr), sp = Math.sin(pr), cp = Math.cos(pr);
+                  cam.fx = -sy * cp;
+                  cam.fy = -sp;
+                  cam.fz = cy * cp;
+                  cam.rx = -cy;
+                  cam.rz = -sy;
+                  cam.ux = -sy * sp;
+                  cam.uy = cp;
+                  cam.uz = cy * sp;
+                  double cpr = Math.toRadians(Math.max(-20.0, Math.min(20.0, pitchDeg)));
+                  cam.cfx = -sy * Math.cos(cpr);
+                  cam.cfy = -Math.sin(cpr);
+                  cam.cfz = cy * Math.cos(cpr);
+                  double fov = mc.options.fov().get();
+                  cam.k = (sh / 2.0) / Math.tan(Math.toRadians(fov) / 2.0);
+                  cam.cx = sw / 2;
+                  cam.cy = sh / 2;
+
+                  // ----- spawn / retire lines -----
+                  long now = System.currentTimeMillis();
+                  int idx = BasicHud.indexAt(lines, Playback.positionMs());
+                  if (idx != lastIdx) {
+                      for (Floating f : items) {
+                          if (f.died < 0) f.died = now;
+                      }
+                      lastIdx = idx;
+                      if (idx >= 0 && !lines.get(idx).text().isBlank()) {
+                          float lat = ((idx * 37) % 11 - 5) * 0.18f;
+                          float vert = ((idx * 53) % 7 - 3) * 0.12f;
+                          String next = idx + 1 < lines.size() ? lines.get(idx + 1).text() : "";
+                          items.add(new Floating(lines.get(idx).text(), next, now,
+                                  cam.place(Config.distance, lat, vert), lat, vert, (idx % 17) * 0.7f));
+                      }
+                  }
+                  final long t0 = now;
+                  items.removeIf(f -> f.died >= 0 && t0 - f.died > FADE_OUT_MS);
+
+                  // ----- song title -----
+                  if (Config.showTitle) {
+                      String head = Playback.artist.isBlank() ? Playback.title : Playback.artist + " - " + Playback.title;
+                      BasicHud.text(g, font, BasicHud.fit(font, head, (int) (sw * 0.8f)), sw / 2, (int) (sh * 0.06f), 0xAA999999);
+                  }
+
+                  // ----- draw -----
+                  for (Floating f : items) {
+                      float age = (now - f.born) / 1000f;
+                      float fadeIn = clamp(age / 0.25f, 0f, 1f);
+                      float alpha = fadeIn;
+                      float rise = Math.min(age, 8f) * 0.03f;
+                      if (f.died >= 0) {
+                          float t = clamp((now - f.died) / (float) FADE_OUT_MS, 0f, 1f);
+                          alpha *= 1f - t;
+                          rise += t * 0.6f;
+                      }
+                      if (alpha <= 0.02f) continue;
+                      float bob = (float) Math.sin(age * 2.0 + f.seed) * 0.03f;
+
+                      double[] a = Config.follow ? cam.place(Config.distance, f.lat, f.vert) : new double[]{f.wx, f.wy, f.wz};
+                      float[] s = cam.project(a[0], a[1] + rise + bob, a[2]);
+                      if (s == null) continue;
+
+                      float scale = clamp((float) (Config.size * cam.k / s[2] / 9.0), 0.3f, 10f) * easeOutBack(fadeIn);
+                      drawFloating(g, font, f, s[0], s[1], scale, alpha, now, sw);
+                  }
+              }
+
+              private static void drawFloating(GuiGraphics g, Font font, Floating f, float sx, float sy, float scale,
+                                               float alpha, long now, int sw) {
+                  int w = Math.max(1, font.width(f.text));
+                  scale = Math.min(scale, sw * 0.92f / w);
+                  var pose = g.pose();
+                  pose.pushMatrix();
+                  pose.translate(sx, sy);
+                  pose.scale(scale, scale);
+
+                  int x0 = -w / 2;
+                  int y0 = -4;
+
+                  if (Config.glow) {
+                      int gc = argb(alpha * 0.28f, colorAt(0.5f, now));
+                      g.drawString(font, f.text, x0 - 1, y0, gc, false);
+                      g.drawString(font, f.text, x0 + 1, y0, gc, false);
+                      g.drawString(font, f.text, x0, y0 - 1, gc, false);
+                      g.drawString(font, f.text, x0, y0 + 1, gc, false);
+                  }
+
+                  int n = f.text.codePointCount(0, f.text.length());
+                  int x = x0;
+                  int i = 0;
+                  int off = 0;
+                  while (off < f.text.length()) {
+                      int cp = f.text.codePointAt(off);
+                      off += Character.charCount(cp);
+                      String ch = new String(Character.toChars(cp));
+                      float t = n > 1 ? i / (float) (n - 1) : 0.5f;
+                      g.drawString(font, ch, x, y0, argb(alpha, colorAt(t, now)), true);
+                      x += font.width(ch);
+                      i++;
+                  }
+
+                  if (Config.showNext && f.died < 0 && f.next != null && !f.next.isBlank()) {
+                      int nw = Math.max(1, font.width(f.next));
+                      float ns = Math.min(0.6f, sw * 0.92f / (scale * nw));
+                      pose.pushMatrix();
+                      pose.translate(0f, 13f);
+                      pose.scale(ns, ns);
+                      g.drawString(font, f.next, -nw / 2, y0, argb(alpha * 0.55f, 0xDDDDDD), true);
+                      pose.popMatrix();
+                  }
+                  pose.popMatrix();
+              }
+
+              // ---------------- colours ----------------
+
+              private static int colorAt(float t, long now) {
+                  switch (Config.theme) {
+                      case "solid":
+                          return Config.color1;
+                      case "gradient":
+                          return lerpRgb(Config.color1, Config.color2, t);
+                      case "album": {
+                          int base = Playback.artColor;
+                          if (base >= 0) {
+                              float[] hsv = rgbToHsv(base);
+                              return hsvToRgb(hsv[0] + (t - 0.5f) * 0.14f, Math.max(hsv[1], 0.4f), Math.max(hsv[2], 0.95f));
+                          }
+                          break;
+                      }
+                      default:
+                          break;
+                  }
+                  // rainbow (also the fallback when there is no album colour)
+                  return hsvToRgb(((now % 8000L) / 8000f) + t * 0.45f, 0.55f, 1f);
+              }
+
+              private static int argb(float alpha, int rgb) {
+                  int a = Math.max(0, Math.min(255, (int) (alpha * 255f)));
+                  return (a << 24) | (rgb & 0xFFFFFF);
+              }
+
+              private static int lerpRgb(int a, int b, float t) {
+                  int r = Math.round(((a >> 16) & 255) * (1 - t) + ((b >> 16) & 255) * t);
+                  int g = Math.round(((a >> 8) & 255) * (1 - t) + ((b >> 8) & 255) * t);
+                  int bl = Math.round((a & 255) * (1 - t) + (b & 255) * t);
+                  return (r << 16) | (g << 8) | bl;
+              }
+
+              private static int hsvToRgb(float h, float s, float v) {
+                  h = h - (float) Math.floor(h);
+                  float c = v * s;
+                  float hh = h * 6f;
+                  float x = c * (1f - Math.abs(hh % 2f - 1f));
+                  float m = v - c;
+                  float r, g, b;
+                  if (hh < 1) { r = c; g = x; b = 0; }
+                  else if (hh < 2) { r = x; g = c; b = 0; }
+                  else if (hh < 3) { r = 0; g = c; b = x; }
+                  else if (hh < 4) { r = 0; g = x; b = c; }
+                  else if (hh < 5) { r = x; g = 0; b = c; }
+                  else { r = c; g = 0; b = x; }
+                  int ri = Math.round((r + m) * 255f);
+                  int gi = Math.round((g + m) * 255f);
+                  int bi = Math.round((b + m) * 255f);
+                  return (ri << 16) | (gi << 8) | bi;
+              }
+
+              private static float[] rgbToHsv(int rgb) {
+                  float r = ((rgb >> 16) & 255) / 255f;
+                  float g = ((rgb >> 8) & 255) / 255f;
+                  float b = (rgb & 255) / 255f;
+                  float max = Math.max(r, Math.max(g, b));
+                  float min = Math.min(r, Math.min(g, b));
+                  float d = max - min;
+                  float h;
+                  if (d == 0) h = 0;
+                  else if (max == r) h = ((g - b) / d) % 6f;
+                  else if (max == g) h = (b - r) / d + 2f;
+                  else h = (r - g) / d + 4f;
+                  h /= 6f;
+                  if (h < 0) h += 1f;
+                  return new float[]{h, max == 0 ? 0 : d / max, max};
+              }
+
+              private static float clamp(float v, float lo, float hi) {
+                  return Math.max(lo, Math.min(hi, v));
+              }
+
+              private static float easeOutBack(float t) {
+                  float c1 = 1.70158f;
+                  float c3 = c1 + 1f;
+                  float u = t - 1f;
+                  return 1f + c3 * u * u * u + c1 * u * u;
+              }
+          }
+          __SRC_EOF__
+      - name: Build mod (floating version first, flat version as fallback)
+        working-directory: mod
+        run: |
+          set -o pipefail
+          mkdir -p dist
+          : > build.log
+          : > full-errors.txt
+          done=0
+          for variant in full basic; do
+            cp "../variants/$variant/Hud.java" src/main/java/com/showlyricsmobile/Hud.java
+            for v in 0.141.3 0.140.2 0.139.4; do
+              echo "=== variant=$variant fabric-api=$v+1.21.11 ===" | tee -a build.log
+              if gradle build --no-daemon --console=plain -Pfabric_version="$v+1.21.11" > attempt.log 2>&1; then
+                cat attempt.log >> build.log
+                cp build/libs/showlyricsmobile-1.0.0.jar "dist/showlyricsmobile-1.21.11-$variant.jar"
+                done=1
+                break
+              fi
+              cat attempt.log >> build.log
+              if grep -q 'error: ' attempt.log; then
+                # a code error: trying other Fabric API versions will not help
+                if [ "$variant" = full ]; then grep -A2 'error: ' attempt.log | head -n 30 > full-errors.txt; fi
+                break
+              fi
+            done
+            if [ "$done" = 1 ]; then break; fi
+          done
+          {
+            if [ "$done" = 1 ]; then echo "### Built: $(ls dist)"; fi
+            if [ "$done" = 1 ] && [ -s full-errors.txt ]; then
+              echo '### The floating-lyrics version failed to compile, so the basic version was built instead.'
+              echo 'Send a screenshot of this box:'
+              echo '```'
+              cat full-errors.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$done" = 1
+      - name: Show errors in the run summary
+        if: failure()
+        working-directory: mod
+        run: |
+          touch build.log
+          {
+            echo '### Build failed - send a screenshot of this box'
+            echo '```'
+            grep -n -i -E 'what went wrong|error:|could not|not found|unsupported|failed' build.log | head -n 40 || true
+            echo '...'
+            tail -n 25 build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: show-lyrics-mobile-mod
+          path: mod/dist/*.jar
+
+  app:
+    name: Android app (Lyrics Bridge)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '8.10.2'
+      - name: Write app sources
+        run: |
+          mkdir -p "bridge-app"
+          cat > "bridge-app/build.gradle" <<'__SRC_EOF__'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          __SRC_EOF__
+          mkdir -p "bridge-app"
+          cat > "bridge-app/gradle.properties" <<'__SRC_EOF__'
+          org.gradle.jvmargs=-Xmx2048m
+          __SRC_EOF__
+          mkdir -p "bridge-app"
+          cat > "bridge-app/settings.gradle" <<'__SRC_EOF__'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'LyricsBridge'
+          include ':app'
+          __SRC_EOF__
+          mkdir -p "bridge-app/app"
+          cat > "bridge-app/app/build.gradle" <<'__SRC_EOF__'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.lyricsbridge'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.lyricsbridge'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          __SRC_EOF__
+          mkdir -p "bridge-app/app/src/main"
+          cat > "bridge-app/app/src/main/AndroidManifest.xml" <<'__SRC_EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:label="Lyrics Bridge"
+                  android:theme="@android:style/Theme.DeviceDefault">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".MediaListener"
+                      android:exported="true"
+                      android:label="Lyrics Bridge"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          __SRC_EOF__
+          mkdir -p "bridge-app/app/src/main/java/com/lyricsbridge"
+          cat > "bridge-app/app/src/main/java/com/lyricsbridge/MainActivity.java" <<'__SRC_EOF__'
+          package com.lyricsbridge;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          public class MainActivity extends Activity {
+              private TextView status;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  int pad = (int) (24 * getResources().getDisplayMetrics().density);
+                  root.setPadding(pad, pad, pad, pad);
+
+                  status = new TextView(this);
+                  status.setTextSize(16);
+                  root.addView(status);
+
+                  Button open = new Button(this);
+                  open.setText("Open notification access settings");
+                  open.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
+                  root.addView(open);
+
+                  TextView help = new TextView(this);
+                  help.setTextSize(14);
+                  help.setPadding(0, pad, 0, 0);
+                  help.setText("1. Enable \"Lyrics Bridge\" in notification access.\n"
+                          + "2. Play music (Spotify, YouTube Music...).\n"
+                          + "3. Open Minecraft with the Show Lyrics Mobile mod.\n\n"
+                          + "If Android says \"Restricted setting\": Settings > Apps > Lyrics Bridge > "
+                          + "three dots menu > Allow restricted settings.");
+                  root.addView(help);
+
+                  setContentView(root);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  String flat = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
+                  boolean on = flat != null && flat.contains(getPackageName());
+                  status.setText(on
+                          ? "Notification access: ON\nServer: 127.0.0.1:" + MediaListener.PORT
+                          : "Notification access: OFF\nTap the button and enable \"Lyrics Bridge\".");
+              }
+          }
+          __SRC_EOF__
+          mkdir -p "bridge-app/app/src/main/java/com/lyricsbridge"
+          cat > "bridge-app/app/src/main/java/com/lyricsbridge/MediaListener.java" <<'__SRC_EOF__'
+          package com.lyricsbridge;
+
+          import android.content.ComponentName;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
+          import android.media.MediaMetadata;
+          import android.media.session.MediaController;
+          import android.media.session.MediaSessionManager;
+          import android.media.session.PlaybackState;
+          import android.os.SystemClock;
+          import android.service.notification.NotificationListenerService;
+
+          import org.json.JSONObject;
+
+          import java.io.BufferedReader;
+          import java.io.IOException;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.InetAddress;
+          import java.net.InetSocketAddress;
+          import java.net.ServerSocket;
+          import java.net.Socket;
+          import java.nio.charset.StandardCharsets;
+          import java.util.List;
+
+          /**
+           * Having notification access lets us read the active media sessions.
+           * Serves the current track as JSON on 127.0.0.1:PORT for the Minecraft mod.
+           */
+          public class MediaListener extends NotificationListenerService {
+              static final int PORT = 38917;
+
+              private ServerSocket server;
+              private Thread thread;
+              private String colorKey = "";
+              private int colorVal = -1;
+
+              @Override
+              public void onListenerConnected() {
+                  startServer();
+              }
+
+              @Override
+              public void onListenerDisconnected() {
+                  stopServer();
+              }
+
+              @Override
+              public void onDestroy() {
+                  stopServer();
+                  super.onDestroy();
+              }
+
+              private synchronized void startServer() {
+                  if (thread != null && thread.isAlive()) return;
+                  thread = new Thread(() -> {
+                      try {
+                          ServerSocket ss = new ServerSocket();
+                          ss.setReuseAddress(true);
+                          ss.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT), 8);
+                          server = ss;
+                          while (!ss.isClosed()) {
+                              try (Socket s = ss.accept()) {
+                                  s.setSoTimeout(1000);
+                                  handle(s);
+                              } catch (IOException ignored) {
+                                  // client went away or timed out
+                              }
+                          }
+                      } catch (IOException ignored) {
+                          // could not bind (port in use) or socket closed
+                      }
+                  }, "LyricsBridge-server");
+                  thread.setDaemon(true);
+                  thread.start();
+              }
+
+              private synchronized void stopServer() {
+                  try {
+                      if (server != null) server.close();
+                  } catch (IOException ignored) {
+                  }
+                  server = null;
+                  thread = null;
+              }
+
+              private void handle(Socket s) throws IOException {
+                  BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.US_ASCII));
+                  String line;
+                  while ((line = in.readLine()) != null && !line.isEmpty()) {
+                      // skip request headers
+                  }
+                  byte[] body = buildJson().getBytes(StandardCharsets.UTF_8);
+                  String head = "HTTP/1.1 200 OK\r\n"
+                          + "Content-Type: application/json; charset=utf-8\r\n"
+                          + "Content-Length: " + body.length + "\r\n"
+                          + "Connection: close\r\n\r\n";
+                  OutputStream out = s.getOutputStream();
+                  out.write(head.getBytes(StandardCharsets.US_ASCII));
+                  out.write(body);
+                  out.flush();
+              }
+
+              private String buildJson() {
+                  JSONObject o = new JSONObject();
+                  try {
+                      MediaSessionManager msm = (MediaSessionManager) getSystemService(MEDIA_SESSION_SERVICE);
+                      List<MediaController> list = msm.getActiveSessions(new ComponentName(this, MediaListener.class));
+
+                      MediaController pick = null;
+                      for (MediaController c : list) {
+                          PlaybackState st = c.getPlaybackState();
+                          if (st != null && st.getState() == PlaybackState.STATE_PLAYING) {
+                              pick = c;
+                              break;
+                          }
+                      }
+                      if (pick == null && !list.isEmpty()) pick = list.get(0);
+
+                      MediaMetadata md = pick == null ? null : pick.getMetadata();
+                      if (md == null) {
+                          put(o, "active", false);
+                          return o.toString();
+                      }
+
+                      String title = first(md, MediaMetadata.METADATA_KEY_TITLE, MediaMetadata.METADATA_KEY_DISPLAY_TITLE);
+                      String artist = first(md, MediaMetadata.METADATA_KEY_ARTIST, MediaMetadata.METADATA_KEY_ALBUM_ARTIST,
+                              MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE);
+                      long duration = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
+
+                      PlaybackState st = pick.getPlaybackState();
+                      boolean playing = st != null && st.getState() == PlaybackState.STATE_PLAYING;
+                      long pos = 0;
+                      if (st != null) {
+                          pos = st.getPosition();
+                          if (pos < 0) pos = 0;
+                          if (playing) {
+                              long dt = SystemClock.elapsedRealtime() - st.getLastPositionUpdateTime();
+                              pos += (long) (dt * st.getPlaybackSpeed());
+                          }
+                          if (duration > 0 && pos > duration) pos = duration;
+                      }
+
+                      put(o, "active", true);
+                      put(o, "title", title);
+                      put(o, "artist", artist);
+                      put(o, "durationMs", duration);
+                      put(o, "positionMs", pos);
+                      put(o, "playing", playing);
+                      put(o, "color", albumColor(md, title + "|" + artist));
+                  } catch (Exception e) {
+                      put(o, "active", false);
+                      put(o, "error", String.valueOf(e));
+                  }
+                  return o.toString();
+              }
+
+              /** Average colour of the album art (RGB, brightened), or -1 when there is no art. Cached per song. */
+              private int albumColor(MediaMetadata md, String key) {
+                  if (key.equals(colorKey)) return colorVal;
+                  try {
+                      Bitmap bmp = md.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+                      if (bmp == null) bmp = md.getBitmap(MediaMetadata.METADATA_KEY_ART);
+                      if (bmp == null) bmp = md.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
+                      if (bmp != null && bmp.getWidth() > 0 && bmp.getHeight() > 0) {
+                          Bitmap small = Bitmap.createScaledBitmap(bmp, 16, 16, true);
+                          long r = 0, g = 0, b = 0;
+                          for (int x = 0; x < 16; x++) {
+                              for (int y = 0; y < 16; y++) {
+                                  int px = small.getPixel(x, y);
+                                  r += Color.red(px);
+                                  g += Color.green(px);
+                                  b += Color.blue(px);
+                              }
+                          }
+                          int avg = Color.rgb((int) (r / 256), (int) (g / 256), (int) (b / 256));
+                          float[] hsv = new float[3];
+                          Color.colorToHSV(avg, hsv);
+                          hsv[1] = Math.max(hsv[1], 0.45f);
+                          hsv[2] = Math.max(hsv[2], 0.9f);
+                          colorVal = Color.HSVToColor(hsv) & 0xFFFFFF;
+                          colorKey = key; // only cache successes: some players load the art a moment later
+                          return colorVal;
+                      }
+                  } catch (Exception ignored) {
+                  }
+                  return -1;
+              }
+
+              private static String first(MediaMetadata md, String... keys) {
+                  for (String k : keys) {
+                      String v = md.getString(k);
+                      if (v != null && !v.trim().isEmpty()) return v.trim();
+                  }
+                  return "";
+              }
+
+              private static void put(JSONObject o, String k, Object v) {
+                  try {
+                      o.put(k, v);
+                  } catch (Exception ignored) {
+                  }
+              }
+          }
+          __SRC_EOF__
+      - name: Build APK
+        working-directory: bridge-app
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
+      - name: Show errors in the run summary
+        if: failure()
+        working-directory: bridge-app
+        run: |
+          touch build.log
+          {
+            echo '### Build failed - send a screenshot of this box'
+            echo '```'
+            grep -n -i -E 'what went wrong|error:|could not|not found|unsupported|failed' build.log | head -n 40 || true
+            echo '...'
+            tail -n 25 build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lyrics-bridge-apk
+          path: bridge-app/app/build/outputs/apk/debug/app-debug.apk
